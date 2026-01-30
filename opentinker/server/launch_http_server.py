@@ -22,6 +22,20 @@ def main(cfg):
 
     os.environ["RAY_DEDUP_LOGS"] = "0"
     os.environ["HYDRA_FULL_ERROR"] = "1"
+    
+    # ============================================================================
+    # CRITICAL: vLLM 0.11.0+ CUDA Symmetric Memory Fix
+    # ============================================================================
+    # Disable symmetric memory for all-reduce operations to prevent:
+    # "CUDASymmetricMemoryAllocator::rendezvous: detected allocations from 
+    #  overlapping devices from different ranks"
+    # This occurs when multiple Ray workers use the same GPUs for symmetric memory.
+    # See: verl/verl/trainer/constants_ppo.py for reference
+    os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
+    
+    # Prevent NCCL cumem issues during weight sync between actor and rollout
+    # in disaggregated mode. See vLLM troubleshooting docs.
+    os.environ["NCCL_CUMEM_ENABLE"] = "0"
 
     from omegaconf import open_dict
     import logging

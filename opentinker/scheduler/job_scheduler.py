@@ -1037,6 +1037,15 @@ class JobSchedulerActor:
         env = os.environ.copy()
         # Set CUDA_VISIBLE_DEVICES to comma-separated list of GPU IDs
         env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, job.gpu_ids))
+        
+        # ============================================================================
+        # CRITICAL: vLLM 0.11.0+ CUDA Symmetric Memory Fix
+        # ============================================================================
+        # Disable symmetric memory for all-reduce to prevent device overlap errors
+        # when multiple Ray workers share GPUs.
+        env["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
+        # Prevent NCCL cumem issues during weight sync in disaggregated mode
+        env["NCCL_CUMEM_ENABLE"] = "0"
 
         # Build command line arguments from config
         cmd = [
@@ -1894,6 +1903,13 @@ class JobSchedulerActor:
         env = os.environ.copy()
         # Set CUDA_VISIBLE_DEVICES to comma-separated list of GPU IDs
         env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, job.gpu_ids))
+        
+        # ============================================================================
+        # CRITICAL: vLLM 0.11.0+ CUDA Symmetric Memory Fix
+        # ============================================================================
+        # Disable symmetric memory for all-reduce to prevent device overlap errors
+        env["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
+        env["NCCL_CUMEM_ENABLE"] = "0"
 
         config = job.config
 
