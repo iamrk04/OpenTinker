@@ -204,13 +204,13 @@ cd "$REPO_ROOT"
 
 # Launch scheduler
 if [ "$PORT_RANGE" = "null" ]; then
-    python -m opentinker.scheduler.launch_scheduler_kill \
+    python opentinker/scheduler/launch_scheduler_kill.py \
         available_gpus=$AVAILABLE_GPUS \
         port_range=null \
         num_ports=$NUM_PORTS \
         scheduler_port=$SCHEDULER_PORT
 else
-    python -m opentinker.scheduler.launch_scheduler_kill \
+    python opentinker/scheduler/launch_scheduler_kill.py \
         available_gpus=$AVAILABLE_GPUS \
         port_range=$PORT_RANGE \
         scheduler_port=$SCHEDULER_PORT
