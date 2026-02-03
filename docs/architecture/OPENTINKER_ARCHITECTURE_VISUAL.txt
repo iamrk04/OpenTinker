@@ -1,0 +1,253 @@
+================================================================================
+                    OPENTINKER ARCHITECTURE - QUICK VISUAL GUIDE
+================================================================================
+                          Verified Against Codebase - January 2026
+================================================================================
+
+
+SYSTEM OVERVIEW
+================================================================================
+
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                               USER'S MACHINE (CLIENT + GAME SERVER)                                    │
+│                                                                                                        │
+│  ┌──────────────────────────────────────────────────────────┐  ┌────────────────────────────────────┐  │
+│  │  CLIENT (Training Orchestrator)                          │  │  GAME SERVER (User-launched)       │  │
+│  │                                                          │  │                                    │  │
+│  │  ┌────────────────────────────────────────────────────┐  │  │  python -m opentinker.environment  │  │
+│  │  │  python -m opentinker.client.math_rl ...           │  │  │    .math.math_server --port 8081   │  │
+│  │  └────────────────────────────────────────────────────┘  │  │                                    │  │
+│  │                           │                              │  │  FastAPI Server (Port: 8081)       │  │
+│  │       ┌───────────────────┼───────────────────┐          │  │  ─────────────────────────────     │  │
+│  │       │                   │                   │          │  │  Game Endpoints:                   │  │
+│  │       ▼                   ▼                   ▼          │  │  • POST /reset  → new problem      │  │
+│  │  ┌──────────┐    ┌──────────────┐    ┌────────────┐      │  │  • POST /step   → check answer     │  │
+│  │  │Scheduler │    │ MathGame     │    │ GameStats  │──────┼──►  • GET  /health → health check     │  │
+│  │  │Client    │    │ Environment  │    │ Client     │      │  │                                    │  │
+│  │  └────┬─────┘    │ (DataLoader) │    └────────────┘      │  │  Stats Endpoints (GameStatsClient):│  │
+│  │       │          └──────┬───────┘       │                │  │  • GET  /stats/step → step metrics │  │
+│  │       │                 │               │ GET/POST       │  │  • GET  /stats → all stats         │  │
+│  │       │                 ▼               │ /stats/*       │  │  • GET  /stats/cumulative          │  │
+│  │       │          ┌──────────────┐       │ /health        │  │  • GET  /stats/jobs → list jobs    │  │
+│  │       │          │ServiceClient │       └────────────────┼──►  • POST /stats/reset → reset step  │  │
+│  │       │          │(Train Loop)  │                        │  │  • POST /stats/reset_all           │  │
+│  │       │          └──────┬───────┘                        │  │                                    │  │
+│  └───────┼─────────────────┼────────────────────────────────┘  │  Can be sharded: 8081, 8082, ...   │  │
+│          │                 │                                   └─────────────────────────────▲──────┘  │
+│          │                 │                                                                 │         │
+└──────────┼─────────────────┼─────────────────────────────────────────────────────────────────┼─────────┘
+           │                 │                                                                 │
+           │ HTTP POST       │ HTTP POST                                        HTTP POST/GET  │
+           │ /submit_job     │ /api/v1/train_step                               /reset, /step  │
+           │                 │                                          (from Ray workers via  │
+           │                 │                                           GymEnvironmentInteraction)
+           ▼                 ▼                                                                 │
+┌──────────────────────────────────────────────────────────────────────────────────────────────┼────────┐
+│                           GPU MACHINE (SCHEDULER + TRAINING SERVER)                          │        │
+│                                                                                              │        │
+│  ┌─────────────────────┐                                                                     │        │
+│  │   JOB SCHEDULER     │                                                                     │        │
+│  │   ═══════════════   │                                                                     │        │
+│  │   • GPU Allocation  │                                                                     │        │
+│  │   • Port Assignment │                                                                     │        │
+│  │   • Process Mgmt    │                                                                     │        │
+│  │   Port: 8780        │                                                                     │        │
+│  └─────────┬───────────┘                                                                     │        │
+│            │                                                                                 │        │
+│            │ Spawns subprocess                                                               │        │
+│            ▼                                                                                 │        │
+│  ┌───────────────────────────────────────────────────────────────────────────────────────┐   │        │
+│  │  HTTP Training Server (FastAPI) - Port: 8781 (assigned by scheduler)                  │   │        │
+│  │                                                                                       │   │        │
+│  │  ┌─────────────────────────────────────────────────────────────────────────────────┐  │   │        │
+│  │  │  RayPPOTrainer.init_workers()                                                   │  │   │        │
+│  │  │                                                                                 │  │   │        │
+│  │  │  ┌───────────────────────────────────────────────────────────────────────────┐  │  │   │        │
+│  │  │  │  Ray Worker Groups (FSDP) - Model distributed across GPUs                 │  │  │   │        │
+│  │  │  │  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐                       │  │  │   │        │
+│  │  │  │  │ GPU 0   │  │ GPU 1   │  │ GPU 2   │  │ GPU 3   │                       │  │  │   │        │
+│  │  │  │  │ Shard 0 │◄►│ Shard 1 │◄►│ Shard 2 │◄►│ Shard 3 │                       │  │  │   │        │
+│  │  │  │  └─────────┘  └─────────┘  └─────────┘  └─────────┘                       │  │  │   │        │
+│  │  │  │                 NCCL All-Reduce Gradient Sync                             │  │  │   │        │
+│  │  │  └───────────────────────────────────────────────────────────────────────────┘  │  │   │        │
+│  │  │                                                                                 │  │   │        │
+│  │  │  ┌───────────────────────────────────────────────────────────────────────────┐  │  │   │        │
+│  │  │  │  AgentLoopManager (Multi-turn Mode)                                       │  │  │   │        │
+│  │  │  │                                                                           │  │  │   │        │
+│  │  │  │  ┌─────────────────────────────────────────────────────────────────────┐  │  │  │   │        │
+│  │  │  │  │  AgentLoopWorker (Ray Actor)                                        │  │  │  │   │        │
+│  │  │  │  │                                                                     │  │  │  │   │        │
+│  │  │  │  │  ┌───────────────────────────────────────────────────────────────┐  │  │  │  │   │        │
+│  │  │  │  │  │  GenericAgentLoop                                             │  │  │  │  │   │        │
+│  │  │  │  │  │  ════════════════                                             │  │  │  │  │   │        │
+│  │  │  │  │  │  State Machine:                                               │  │  │  │  │   │        │
+│  │  │  │  │  │  PENDING → GENERATING → INTERACTING → ... → TERMINATED        │  │  │  │  │   │        │
+│  │  │  │  │  │      ↑                      │                                 │  │  │  │  │   │        │
+│  │  │  │  │  │      └──────────────────────┘                                 │  │  │  │  │   │        │
+│  │  │  │  │  │                                                               │  │  │  │  │   │        │
+│  │  │  │  │  │  GymEnvironmentInteraction (aiohttp client)───────────────────┼──┼──┼──┼──┼───┘        │
+│  │  │  │  │  │    Calls: POST /reset, POST /step to Game Server              │  │  │  │  │            │
+│  │  │  │  │  └───────────────────────────────────────────────────────────────┘  │  │  │  │            │
+│  │  │  │  └─────────────────────────────────────────────────────────────────────┘  │  │  │            │
+│  │  │  └───────────────────────────────────────────────────────────────────────────┘  │  │            │
+│  │  └─────────────────────────────────────────────────────────────────────────────────┘  │            │
+│  └───────────────────────────────────────────────────────────────────────────────────────┘            │
+│                                                                                                       │
+└───────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+
+COMMUNICATION SUMMARY
+================================================================================
+
+  ┌─────────────────┐                              ┌─────────────────┐
+  │  CLIENT MACHINE │                              │   GPU MACHINE   │
+  └────────┬────────┘                              └────────┬────────┘
+           │                                                │
+           │  1. SchedulerClient ──POST /submit_job────────►│ JobScheduler
+           │                                                │      │
+           │                                                │      │ spawns
+           │                                                │      ▼
+           │  2. ServiceClient ───POST /api/v1/train_step──►│ Training Server
+           │                                                │      │
+           │                                                │      │ uses
+           │                                                │      ▼
+           │                                                │ Ray Workers
+           │                                                │ (AgentLoopWorker)
+           │                                                │      │
+  ┌────────┴────────┐                                       │      │
+  │   GAME SERVER   │◄──3. POST /reset, /step (aiohttp)─────┼──────┘
+  │   (Port 8081)   │      (GymEnvironmentInteraction)      │
+  └────────┬────────┘                                       │
+           ▲                                                │
+           │                                                │
+  ┌────────┴────────┐                                       │
+  │  GameStats      │  4. GameStatsClient APIs:             │
+  │  Client         │     • GET  /stats/step                │
+  │  (on Client)    │     • GET  /stats                     │
+  │                 │     • GET  /stats/cumulative          │
+  │                 │     • GET  /stats/jobs                │
+  │                 │     • POST /stats/reset               │
+  │                 │     • POST /stats/reset_all           │
+  │                 │     • GET  /health                    │
+  └─────────────────┘     (queries game metrics for logging)│
+
+
+DATA FLOW IN ONE TRAINING STEP
+================================================================================
+
+1. Client sends batch to Training Server
+   ────────────────────────────────────
+   DataLoader → DataProto → POST /api/v1/train_step
+
+2. Training Server generates responses (multi-turn)
+   ─────────────────────────────────────────────────
+   ┌─────────────────────────────────────────────────────────────────────────┐
+   │  GenericAgentLoop State Machine:                                        │
+   │                                                                         │
+   │  PENDING ─────► GENERATING ─────► INTERACTING ─────► GENERATING ─────►  │
+   │     │               │                   │                   │           │
+   │     │               ▼                   ▼                   │           │
+   │     │          Call vLLM           Call Game              ...           │
+   │     │          for LLM             Server for                           │
+   │     │          response            environment                          │
+   │     │          (mask=1)            response                             │
+   │     │                              (mask=0)                             │
+   │     │                                                                   │
+   │     └─────────────────────────► TERMINATED (when done=True or max_turns)│
+   └─────────────────────────────────────────────────────────────────────────┘
+
+3. PPO Update
+   ───────────
+   • compute_reward()       - Sum of per-turn rewards
+   • compute_log_prob()     - Old policy log probs
+   • compute_ref_log_prob() - Reference policy (for KL)
+   • compute_values()       - Critic value estimates
+   • compute_advantage()    - GAE / GRPO / REINFORCE
+   • update_actor()         - Policy gradient step (FSDP sync)
+   • update_critic()        - Value function step
+
+4. Return metrics to client
+   ─────────────────────────
+   {status, global_steps, metrics{reward, entropy, policy_loss, ...}}
+
+
+RESPONSE MASK VISUALIZATION
+================================================================================
+
+Multi-turn conversation example:
+
+    ┌─────────────────────────────────────────────────────────────────────────┐
+    │  Tokens:                                                                │
+    │                                                                         │
+    │  PROMPT:      [SYSTEM] You are a math solver. [USER] Solve: 2+3=?      │
+    │                                                                         │
+    │  RESPONSE:    [ASSISTANT] The answer is 5. [ENV] Correct! Next: 4-1=?  │
+    │               [ASSISTANT] That's 3.        [ENV] Done! Score: 2/2      │
+    │               [PADDING................................]                 │
+    │                                                                         │
+    │  MASK:        1,1,1,1,1,1,1,1,1,1,1,1,1,1  0,0,0,0,0,0,0,0,0,0,0,0,0,0│
+    │               1,1,1,1,1,1,1,1,1,1,1,1      0,0,0,0,0,0,0,0,0,0,0,0    │
+    │               0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 │
+    │                                                                         │
+    │  Legend:                                                                │
+    │    mask=1 → LLM-generated tokens (included in loss)                    │
+    │    mask=0 → Environment/padding tokens (excluded from loss)            │
+    └─────────────────────────────────────────────────────────────────────────┘
+
+
+KEY FILES QUICK REFERENCE
+================================================================================
+
+CLIENT LAYER (User's Machine):
+├── opentinker/client/math_rl.py              # Entry point
+├── opentinker/client/utils/http_training_client.py  # HTTP clients
+├── opentinker/environment/math/math_env.py   # Environment setup
+└── opentinker/environment/game_stats_client.py  # Stats queries
+
+GAME SERVER (User's Machine - typically):
+├── opentinker/environment/base_game_server.py    # Generic server
+├── opentinker/environment/base_game.py           # Game interface
+├── opentinker/environment/math/math_game.py      # Math game impl
+├── opentinker/environment/math/math_server.py    # Launch script
+└── opentinker/environment/gym_environment_interaction.py  # HTTP client (runs on GPU)
+
+SCHEDULER + TRAINING SERVER (GPU Machine):
+├── opentinker/scheduler/job_scheduler.py     # GPU allocation
+├── opentinker/server/http_training_server.py # FastAPI wrapper
+├── opentinker/backend_patch/verl/trainer/ppo/ray_trainer.py  # PPO trainer
+├── opentinker/server/generic_agent_loop.py   # Multi-turn loop
+├── verl/verl/experimental/agent_loop/agent_loop.py  # Agent workers
+└── verl/verl/workers/fsdp_workers.py         # FSDP model workers
+
+
+STARTUP COMMANDS
+================================================================================
+
+1. Start Game Server (on client machine, terminal 1):
+   python -m opentinker.environment.math.math_server --port 8081
+
+2. Start Job Scheduler (on GPU machine, terminal 1):
+   cd opentinker/scripts && bash launch_scheduler.sh
+
+3. Start Training Client (on client machine, terminal 2):
+   python -m opentinker.client.math_rl \
+       model_path=Qwen/Qwen2.5-0.5B-Instruct \
+       num_gpus=4 \
+       batch_size=16 \
+       scheduler_url=http://<gpu_machine_ip>:8780 \
+       interaction.config.env_host=<client_machine_ip>
+
+
+DEFAULT PORTS
+================================================================================
+
+ Port  │ Service            │ Machine          │ Notes
+───────┼────────────────────┼──────────────────┼──────────────────────────────
+ 8780  │ JobScheduler       │ GPU Machine      │ Fixed
+ 8781+ │ Training Servers   │ GPU Machine      │ Dynamically assigned
+ 8081  │ Game Server        │ Client Machine   │ User-configured, can be sharded
+
+
+================================================================================
+                              END OF DIAGRAM
+================================================================================
